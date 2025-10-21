@@ -1,18 +1,26 @@
-import asyncio, os
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import os
 
-TOKEN = os.getenv("BOT_TOKEN")  # возьмём из переменных окружения на Render
+# Получаем токен из переменной окружения (Railway)
+TOKEN = os.getenv("TOKEN")
+bot = telebot.TeleBot(TOKEN)
 
-bot = Bot(TOKEN)
-dp = Dispatcher()
+# URL твоего сайта
+WEBAPP_URL = "https://ngfreyman-jpg.github.io/forfriends-catalog/"
 
-@dp.message(Command("start"))
-async def start_cmd(m: types.Message):
-    await m.answer("Привет! Бот работает ✅")
+@bot.message_handler(commands=['start'])
+def start(message):
+    markup = InlineKeyboardMarkup()
+    btn = InlineKeyboardButton(
+        text="Открыть каталог 👕",
+        web_app={"url": WEBAPP_URL}
+    )
+    markup.add(btn)
+    bot.send_message(
+        message.chat.id,
+        "Привет! 👋\nНажми кнопку ниже, чтобы открыть каталог:",
+        reply_markup=markup
+    )
 
-async def main():
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+bot.polling(none_stop=True)
