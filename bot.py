@@ -14,7 +14,11 @@ if not TOKEN:
     raise RuntimeError("Переменная окружения BOT_TOKEN/TOKEN не задана")
 
 # ---- ссылки на каталог (можно переопределить в env)
-WEBAPP_URL = os.getenv("CATALOG_WEBAPP_URL") or os.getenv("CATALOG_URL") or "https://ngfreyman-jpg.github.io/forfriends-catalog/"
+WEBAPP_URL = (
+    os.getenv("CATALOG_WEBAPP_URL")
+    or os.getenv("CATALOG_URL")
+    or "https://ngfreyman-jpg.github.io/forfriends-catalog/"
+)
 
 # ---- маршрутизация заказов (разделённые конфиги)
 def _parse_int(val: Optional[str]) -> Optional[int]:
@@ -99,5 +103,21 @@ def handle_web_app_data(message):
     else:
         bot.send_message(message.chat.id, "⚠️ Заказ создан, но не все адресаты получили сообщение. Свяжитесь с продавцом на всякий случай.")
 
-# ===== Поллинг =====
-bot.infinity_polling(skip_pending=True)
+# ===== Запуск: снять вебхук и стартовать polling =====
+if __name__ == "__main__":
+    import time
+    try:
+        info = bot.get_webhook_info()
+        print("Webhook info:", info)  # увидишь в логах Railway
+        # важно: снять вебхук и удалить хвосты, чтобы polling не конфликтовал
+        bot.remove_webhook(drop_pending_updates=True)
+        time.sleep(0.5)
+    except Exception as e:
+        print("remove_webhook failed:", e)
+
+    bot.infinity_polling(
+        skip_pending=True,
+        timeout=60,
+        long_polling_timeout=50,
+        allowed_updates=["message", "web_app_data"]
+    )
