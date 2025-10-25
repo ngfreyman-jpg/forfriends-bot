@@ -68,28 +68,6 @@ def send_log(msg: str):
         try: bot.send_message(ORDERS_LOG_CHAT_ID, msg)
         except Exception as e: logging.warning("send_log failed: %s", e)
 
-def deliver_order(message, payload: dict):
-    """Отправка заказа продавцу + копия отправителю + (опц.) лог-чат."""
-    text = format_order(payload, message.from_user)
-
-    targets = []
-    if SELLER_CHAT_ID: targets.append(SELLER_CHAT_ID)
-    targets.append(message.chat.id)  # копия отправителю — чтобы сразу увидеть результат
-    if ORDERS_LOG_CHAT_ID: targets.append(ORDERS_LOG_CHAT_ID)
-
-    errs = 0
-    for chat_id in targets:
-        try:
-            bot.send_message(chat_id, text)
-        except Exception as e:
-            errs += 1
-            logging.exception("deliver fail to %s: %s", chat_id, e)
-
-    if errs == 0 and message.chat.id != SELLER_CHAT_ID:
-        bot.send_message(message.chat.id, "✅ Заказ отправлен продавцу. Копия у вас.")
-    elif errs > 0:
-        bot.send_message(message.chat.id, "⚠️ Заказ создан, но не все адресаты получили сообщение.")
-
 # ===== UI
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
@@ -101,35 +79,39 @@ def cmd_start(message):
 def cmd_id(message):
     bot.send_message(message.chat.id, f"Ваш chat_id: <code>{message.chat.id}</code>")
 
-# ===== Приём заказа из WebApp (основной хэндлер)
+# ===== Приём заказа из WebApp
 @bot.message_handler(content_types=['web_app_data'])
 def handle_web_app_data(message):
     try:
         payload = json.loads(message.web_app_data.data)
-        logging.info("GOT WEB_APP_DATA (native) from %s: %s", message.from_user.id, payload)
+        logging.info("GOT WEB_APP_DATA from %s: %s", message.from_user.id, payload)
         send_log(f"🧩 got web_app_data from <code>{message.from_user.id}</code>")
     except Exception as e:
         logging.exception("bad web_app_data: %s", e)
         bot.send_message(message.chat.id, "Не удалось обработать заказ 😕 Попробуйте ещё раз.")
         return
-    deliver_order(message, payload)
 
-# ===== ФОЛБЭК для старых версий: web_app_data приходит как обычный message
-@bot.message_handler(content_types=['text'])
-def handle_text_possible_webapp(message):
-    wad = getattr(message, 'web_app_data', None)
-    if wad and getattr(wad, 'data', None):
+    text = format_order(payload, message.from_user)
+
+    # Куда отправлять: продавцу + копия отправителю + (опц.) лог-чат
+    targets = []
+    if SELLER_CHAT_ID: targets.append(SELLER_CHAT_ID)
+    targets.append(message.chat.id)
+    if ORDERS_LOG_CHAT_ID: targets.append(ORDERS_LOG_CHAT_ID)
+
+    errs = 0
+    for chat_id in targets:
         try:
-            payload = json.loads(wad.data)
-            logging.info("GOT WEB_APP_DATA (fallback/text) from %s: %s", message.from_user.id, payload)
-            send_log(f"🧩 got web_app_data (fallback) from <code>{message.from_user.id}</code>")
-            deliver_order(message, payload)
-            return
+            bot.send_message(chat_id, text)
         except Exception as e:
-            logging.exception("bad web_app_data (fallback): %s", e)
-            bot.send_message(message.chat.id, "Не удалось обработать заказ 😕 Попробуйте ещё раз.")
-            return
-    # обычные тексты можно игнорировать/отвечать по желанию
+            errs += 1
+            logging.exception("deliver fail to %s: %s", chat_id, e)
+
+    if errs == 0:
+        if message.chat.id != SELLER_CHAT_ID:
+            bot.send_message(message.chat.id, "✅ Заказ отправлен продавцу. Копия у вас.")
+    else:
+        bot.send_message(message.chat.id, "⚠️ Заказ создан, но не все адресаты получили сообщение.")
 
 # ===== запуск: снять вебхук и стартовать polling (совместимо со старым telebot)
 if __name__ == "__main__":
@@ -140,13 +122,6 @@ if __name__ == "__main__":
         time.sleep(0.5)
     except Exception as e:
         print("remove_webhook failed:", e)
-
-    # опционально: уведомление о старте
-    try:
-        if SELLER_CHAT_ID:
-            bot.send_message(SELLER_CHAT_ID, "🚀 Бот запущен, ожидаю заказы.")
-    except Exception as e:
-        logging.warning("Can't DM SELLER_CHAT_ID on startup: %s", e)
 
     bot.infinity_polling(
         skip_pending=True,
