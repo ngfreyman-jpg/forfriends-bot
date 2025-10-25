@@ -5,10 +5,12 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 logging.basicConfig(level=logging.INFO)
 
+# --- токен
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN/TOKEN не задан")
 
+# --- адрес веб-аппа (кнопка /start)
 WEBAPP_URL = (
     os.getenv("CATALOG_WEBAPP_URL")
     or os.getenv("CATALOG_URL")
@@ -27,6 +29,7 @@ ORDERS_LOG_CHAT_ID: Optional[int] = _parse_int(os.getenv("ORDERS_LOG_CHAT_ID"))
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
+# ===== helpers
 def safe(x): return html.escape(str(x or ""))
 
 def format_order(data: dict, fallback_user) -> str:
@@ -65,32 +68,13 @@ def send_log(msg: str):
         try: bot.send_message(ORDERS_LOG_CHAT_ID, msg)
         except Exception as e: logging.warning("send_log failed: %s", e)
 
-@bot.message_handler(commands=['start'])
-def cmd_start(message):
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton(text="Открыть каталог 👕", web_app=WebAppInfo(WEBAPP_URL)))
-    bot.send_message(message.chat.id, "Привет! Нажми кнопку, чтобы открыть каталог:", reply_markup=kb)
-
-@bot.message_handler(commands=['id'])
-def cmd_id(message):
-    bot.send_message(message.chat.id, f"Ваш chat_id: <code>{message.chat.id}</code>")
-
-@bot.message_handler(content_types=['web_app_data'])
-def handle_web_app_data(message):
-    try:
-        payload = json.loads(message.web_app_data.data)
-        logging.info("GOT WEB_APP_DATA from %s: %s", message.from_user.id, payload)
-        send_log(f"🧩 got web_app_data from <code>{message.from_user.id}</code>")
-    except Exception as e:
-        logging.exception("bad web_app_data: %s", e)
-        bot.send_message(message.chat.id, "Не удалось обработать заказ 😕 Попробуйте ещё раз.")
-        return
-
+def deliver_order(message, payload: dict):
+    """Отправка заказа продавцу + копия отправителю + (опц.) лог-чат."""
     text = format_order(payload, message.from_user)
 
     targets = []
     if SELLER_CHAT_ID: targets.append(SELLER_CHAT_ID)
-    targets.append(message.chat.id)  # копия отправителю, чтобы ты видел результат
+    targets.append(message.chat.id)  # копия отправителю — чтобы сразу увидеть результат
     if ORDERS_LOG_CHAT_ID: targets.append(ORDERS_LOG_CHAT_ID)
 
     errs = 0
@@ -101,20 +85,68 @@ def handle_web_app_data(message):
             errs += 1
             logging.exception("deliver fail to %s: %s", chat_id, e)
 
-    if errs == 0:
-        if message.chat.id != SELLER_CHAT_ID:
-            bot.send_message(message.chat.id, "✅ Заказ отправлен продавцу. Копия у вас.")
-    else:
+    if errs == 0 and message.chat.id != SELLER_CHAT_ID:
+        bot.send_message(message.chat.id, "✅ Заказ отправлен продавцу. Копия у вас.")
+    elif errs > 0:
         bot.send_message(message.chat.id, "⚠️ Заказ создан, но не все адресаты получили сообщение.")
 
+# ===== UI
+@bot.message_handler(commands=['start'])
+def cmd_start(message):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(text="Открыть каталог 👕", web_app=WebAppInfo(WEBAPP_URL)))
+    bot.send_message(message.chat.id, "Привет! Нажми кнопку, чтобы открыть каталог:", reply_markup=kb)
+
+@bot.message_handler(commands=['id'])
+def cmd_id(message):
+    bot.send_message(message.chat.id, f"Ваш chat_id: <code>{message.chat.id}</code>")
+
+# ===== Приём заказа из WebApp (основной хэндлер)
+@bot.message_handler(content_types=['web_app_data'])
+def handle_web_app_data(message):
+    try:
+        payload = json.loads(message.web_app_data.data)
+        logging.info("GOT WEB_APP_DATA (native) from %s: %s", message.from_user.id, payload)
+        send_log(f"🧩 got web_app_data from <code>{message.from_user.id}</code>")
+    except Exception as e:
+        logging.exception("bad web_app_data: %s", e)
+        bot.send_message(message.chat.id, "Не удалось обработать заказ 😕 Попробуйте ещё раз.")
+        return
+    deliver_order(message, payload)
+
+# ===== ФОЛБЭК для старых версий: web_app_data приходит как обычный message
+@bot.message_handler(content_types=['text'])
+def handle_text_possible_webapp(message):
+    wad = getattr(message, 'web_app_data', None)
+    if wad and getattr(wad, 'data', None):
+        try:
+            payload = json.loads(wad.data)
+            logging.info("GOT WEB_APP_DATA (fallback/text) from %s: %s", message.from_user.id, payload)
+            send_log(f"🧩 got web_app_data (fallback) from <code>{message.from_user.id}</code>")
+            deliver_order(message, payload)
+            return
+        except Exception as e:
+            logging.exception("bad web_app_data (fallback): %s", e)
+            bot.send_message(message.chat.id, "Не удалось обработать заказ 😕 Попробуйте ещё раз.")
+            return
+    # обычные тексты можно игнорировать/отвечать по желанию
+
+# ===== запуск: снять вебхук и стартовать polling (совместимо со старым telebot)
 if __name__ == "__main__":
     try:
         info = bot.get_webhook_info()
-        print("Webhook info:", info)  # для контроля в логах
-        bot.remove_webhook()          # версия без аргументов — совместима
+        print("Webhook info:", info)      # увидишь в логах Railway
+        bot.remove_webhook()              # без аргументов — совместимо
         time.sleep(0.5)
     except Exception as e:
         print("remove_webhook failed:", e)
+
+    # опционально: уведомление о старте
+    try:
+        if SELLER_CHAT_ID:
+            bot.send_message(SELLER_CHAT_ID, "🚀 Бот запущен, ожидаю заказы.")
+    except Exception as e:
+        logging.warning("Can't DM SELLER_CHAT_ID on startup: %s", e)
 
     bot.infinity_polling(
         skip_pending=True,
