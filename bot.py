@@ -5,12 +5,10 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 logging.basicConfig(level=logging.INFO)
 
-# --- токен
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN/TOKEN не задан")
 
-# --- адрес веб-аппа (кнопка /start)
 WEBAPP_URL = (
     os.getenv("CATALOG_WEBAPP_URL")
     or os.getenv("CATALOG_URL")
@@ -29,7 +27,6 @@ ORDERS_LOG_CHAT_ID: Optional[int] = _parse_int(os.getenv("ORDERS_LOG_CHAT_ID"))
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
-# ===== helpers
 def safe(x): return html.escape(str(x or ""))
 
 def format_order(data: dict, fallback_user) -> str:
@@ -68,7 +65,6 @@ def send_log(msg: str):
         try: bot.send_message(ORDERS_LOG_CHAT_ID, msg)
         except Exception as e: logging.warning("send_log failed: %s", e)
 
-# ===== UI
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     kb = InlineKeyboardMarkup()
@@ -79,7 +75,6 @@ def cmd_start(message):
 def cmd_id(message):
     bot.send_message(message.chat.id, f"Ваш chat_id: <code>{message.chat.id}</code>")
 
-# ===== Приём заказа из WebApp
 @bot.message_handler(content_types=['web_app_data'])
 def handle_web_app_data(message):
     try:
@@ -93,10 +88,9 @@ def handle_web_app_data(message):
 
     text = format_order(payload, message.from_user)
 
-    # Куда отправлять: продавец + отправитель + (опц.) лог-чат
     targets = []
     if SELLER_CHAT_ID: targets.append(SELLER_CHAT_ID)
-    targets.append(message.chat.id)  # КОПИЯ ОТПРАВИТЕЛЮ — важно для теста
+    targets.append(message.chat.id)  # копия отправителю, чтобы ты видел результат
     if ORDERS_LOG_CHAT_ID: targets.append(ORDERS_LOG_CHAT_ID)
 
     errs = 0
@@ -113,12 +107,11 @@ def handle_web_app_data(message):
     else:
         bot.send_message(message.chat.id, "⚠️ Заказ создан, но не все адресаты получили сообщение.")
 
-# ===== запуск: снять вебхук и стартовать polling
 if __name__ == "__main__":
     try:
         info = bot.get_webhook_info()
-        print("Webhook info:", info)
-        bot.remove_webhook(drop_pending_updates=True)
+        print("Webhook info:", info)  # для контроля в логах
+        bot.remove_webhook()          # версия без аргументов — совместима
         time.sleep(0.5)
     except Exception as e:
         print("remove_webhook failed:", e)
@@ -126,6 +119,5 @@ if __name__ == "__main__":
     bot.infinity_polling(
         skip_pending=True,
         timeout=60,
-        long_polling_timeout=50,
-        allowed_updates=["message", "web_app_data"]
+        long_polling_timeout=50
     )
