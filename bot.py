@@ -3,7 +3,7 @@ from typing import Optional
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 # --- токен
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TOKEN")
@@ -21,7 +21,7 @@ def _parse_int(v: Optional[str]) -> Optional[int]:
     try:
         s = str(v or "").strip()
         return int(s) if s and s.lower() != "none" else None
-    except:
+    except Exception:
         return None
 
 SELLER_CHAT_ID: Optional[int]     = _parse_int(os.getenv("SELLER_CHAT_ID", "1048516560"))
@@ -74,7 +74,7 @@ def deliver_order(message, payload: dict):
 
     targets = []
     if SELLER_CHAT_ID: targets.append(SELLER_CHAT_ID)
-    targets.append(message.chat.id)  # копия отправителю — чтобы сразу увидеть результат
+    targets.append(message.chat.id)  # копия отправителю
     if ORDERS_LOG_CHAT_ID: targets.append(ORDERS_LOG_CHAT_ID)
 
     errs = 0
@@ -114,7 +114,7 @@ def handle_web_app_data(message):
         return
     deliver_order(message, payload)
 
-# ===== ФОЛБЭК для старых версий: web_app_data приходит как обычный message
+# ===== ФОЛБЭК: иногда web_app_data приходит вместе с text
 @bot.message_handler(content_types=['text'])
 def handle_text_possible_webapp(message):
     wad = getattr(message, 'web_app_data', None)
@@ -129,19 +129,18 @@ def handle_text_possible_webapp(message):
             logging.exception("bad web_app_data (fallback): %s", e)
             bot.send_message(message.chat.id, "Не удалось обработать заказ 😕 Попробуйте ещё раз.")
             return
-    # обычные тексты можно игнорировать/отвечать по желанию
+    # прочие тексты игнорим/обрабатываем по желанию
 
-# ===== запуск: снять вебхук и стартовать polling (совместимо со старым telebot)
+# ===== запуск: снятие вебхука и polling
 if __name__ == "__main__":
     try:
         info = bot.get_webhook_info()
-        print("Webhook info:", info)      # увидишь в логах Railway
-        bot.remove_webhook()              # без аргументов — совместимо
+        print("Webhook info:", info)
+        bot.remove_webhook()     # без лишних аргументов — совместимо со старыми версиями
         time.sleep(0.5)
     except Exception as e:
         print("remove_webhook failed:", e)
 
-    # опционально: уведомление о старте
     try:
         if SELLER_CHAT_ID:
             bot.send_message(SELLER_CHAT_ID, "🚀 Бот запущен, ожидаю заказы.")
