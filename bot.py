@@ -2,28 +2,20 @@ import os, json, html, logging, time
 from typing import Optional
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
-from flask import Flask, request, abort
 
 logging.basicConfig(level=logging.INFO)
 
-# === конфиги
+# --- токен
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN/TOKEN не задан")
 
+# --- адрес веб-аппа (кнопка /start)
 WEBAPP_URL = (
     os.getenv("CATALOG_WEBAPP_URL")
     or os.getenv("CATALOG_URL")
     or "https://ngfreyman-jpg.github.io/forfriends-catalog/"
 )
-
-WEBHOOK_BASE = os.getenv("WEBHOOK_BASE")  # напр. https://forfriends-bot-production.up.railway.app
-if not WEBHOOK_BASE:
-    raise RuntimeError("WEBHOOK_BASE не задан (публичный домен Railway)")
-
-# секретный путь вебхука: лучше не палить токен в урле
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") or "wh-" + str(abs(hash(TOKEN)) % 10_000_000)
-WEBHOOK_PATH = f"/{WEBHOOK_SECRET}"
 
 def _parse_int(v: Optional[str]) -> Optional[int]:
     try:
@@ -36,7 +28,6 @@ SELLER_CHAT_ID: Optional[int]     = _parse_int(os.getenv("SELLER_CHAT_ID", "1048
 ORDERS_LOG_CHAT_ID: Optional[int] = _parse_int(os.getenv("ORDERS_LOG_CHAT_ID"))
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
-app = Flask(__name__)
 
 # ===== helpers
 def safe(x): return html.escape(str(x or ""))
@@ -78,10 +69,12 @@ def send_log(msg: str):
         except Exception as e: logging.warning("send_log failed: %s", e)
 
 def deliver_order(message, payload: dict):
+    """Отправка заказа продавцу + копия отправителю + (опц.) лог-чат."""
     text = format_order(payload, message.from_user)
+
     targets = []
     if SELLER_CHAT_ID: targets.append(SELLER_CHAT_ID)
-    targets.append(message.chat.id)  # копия отправителю
+    targets.append(message.chat.id)  # копия отправителю — чтобы сразу увидеть результат
     if ORDERS_LOG_CHAT_ID: targets.append(ORDERS_LOG_CHAT_ID)
 
     errs = 0
@@ -108,47 +101,55 @@ def cmd_start(message):
 def cmd_id(message):
     bot.send_message(message.chat.id, f"Ваш chat_id: <code>{message.chat.id}</code>")
 
-# ===== Приём заказа из WebApp
+# ===== Приём заказа из WebApp (основной хэндлер)
 @bot.message_handler(content_types=['web_app_data'])
 def handle_web_app_data(message):
     try:
         payload = json.loads(message.web_app_data.data)
-        logging.info("GOT WEB_APP_DATA from %s: %s", message.from_user.id, payload)
+        logging.info("GOT WEB_APP_DATA (native) from %s: %s", message.from_user.id, payload)
         send_log(f"🧩 got web_app_data from <code>{message.from_user.id}</code>")
-        deliver_order(message, payload)
     except Exception as e:
         logging.exception("bad web_app_data: %s", e)
         bot.send_message(message.chat.id, "Не удалось обработать заказ 😕 Попробуйте ещё раз.")
+        return
+    deliver_order(message, payload)
 
-# ===== Flask: health и webhook
-@app.get("/")
-def health():
-    return "ok", 200
-
-@app.post(WEBHOOK_PATH)
-def telegram_webhook():
-    if request.headers.get("Content-Type", "").startswith("application/json"):
-        update_json = request.get_data().decode("utf-8")
+# ===== ФОЛБЭК для старых версий: web_app_data приходит как обычный message
+@bot.message_handler(content_types=['text'])
+def handle_text_possible_webapp(message):
+    wad = getattr(message, 'web_app_data', None)
+    if wad and getattr(wad, 'data', None):
         try:
-            update = telebot.types.Update.de_json(update_json)
-            bot.process_new_updates([update])
+            payload = json.loads(wad.data)
+            logging.info("GOT WEB_APP_DATA (fallback/text) from %s: %s", message.from_user.id, payload)
+            send_log(f"🧩 got web_app_data (fallback) from <code>{message.from_user.id}</code>")
+            deliver_order(message, payload)
+            return
         except Exception as e:
-            logging.exception("process update failed: %s", e)
-            return "bad update", 200
-        return "ok", 200
-    abort(415)
+            logging.exception("bad web_app_data (fallback): %s", e)
+            bot.send_message(message.chat.id, "Не удалось обработать заказ 😕 Попробуйте ещё раз.")
+            return
+    # обычные тексты можно игнорировать/отвечать по желанию
 
-# ===== Инициализация вебхука при старте контейнера
-with app.app_context():
+# ===== запуск: снять вебхук и стартовать polling (совместимо со старым telebot)
+if __name__ == "__main__":
     try:
         info = bot.get_webhook_info()
-        print("Webhook info(before):", info)
-        bot.remove_webhook()
+        print("Webhook info:", info)      # увидишь в логах Railway
+        bot.remove_webhook()              # без аргументов — совместимо
         time.sleep(0.5)
-        full_url = WEBHOOK_BASE.rstrip("/") + WEBHOOK_PATH
-        if bot.set_webhook(full_url):
-            print("Webhook set to:", full_url)
-        else:
-            print("Webhook set: returned False (will try anyway)")
     except Exception as e:
-        print("set_webhook failed:", e)
+        print("remove_webhook failed:", e)
+
+    # опционально: уведомление о старте
+    try:
+        if SELLER_CHAT_ID:
+            bot.send_message(SELLER_CHAT_ID, "🚀 Бот запущен, ожидаю заказы.")
+    except Exception as e:
+        logging.warning("Can't DM SELLER_CHAT_ID on startup: %s", e)
+
+    bot.infinity_polling(
+        skip_pending=True,
+        timeout=60,
+        long_polling_timeout=50
+    )
