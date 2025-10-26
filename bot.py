@@ -65,17 +65,21 @@ def format_order(data: dict, fallback_user) -> str:
 
 def send_log(msg: str):
     if ORDERS_LOG_CHAT_ID:
-        try: bot.send_message(ORDERS_LOG_CHAT_ID, msg)
-        except Exception as e: logging.warning("send_log failed: %s", e)
+        try:
+            bot.send_message(ORDERS_LOG_CHAT_ID, msg)
+        except Exception as e:
+            logging.warning("send_log failed: %s", e)
 
 def deliver_order(message, payload: dict):
     """Отправка заказа продавцу + копия отправителю + (опц.) лог-чат."""
     text = format_order(payload, message.from_user)
 
     targets = []
-    if SELLER_CHAT_ID: targets.append(SELLER_CHAT_ID)
+    if SELLER_CHAT_ID:
+        targets.append(SELLER_CHAT_ID)
     targets.append(message.chat.id)  # копия отправителю
-    if ORDERS_LOG_CHAT_ID: targets.append(ORDERS_LOG_CHAT_ID)
+    if ORDERS_LOG_CHAT_ID:
+        targets.append(ORDERS_LOG_CHAT_ID)
 
     errs = 0
     for chat_id in targets:
@@ -129,26 +133,62 @@ def handle_text_possible_webapp(message):
             logging.exception("bad web_app_data (fallback): %s", e)
             bot.send_message(message.chat.id, "Не удалось обработать заказ 😕 Попробуйте ещё раз.")
             return
-    # прочие тексты игнорим/обрабатываем по желанию
+    # прочие тексты — по желанию
 
-# ===== запуск: снятие вебхука и polling
-if __name__ == "__main__":
+# ===== очень простой отладочный логер (не влияет на логику)
+@bot.message_handler(func=lambda m: True, content_types=[
+    'text','web_app_data','photo','document','contact','location','venue',
+    'sticker','audio','video','voice','dice','poll'
+])
+def _dbg_everything(message):
     try:
-        info = bot.get_webhook_info()
-        print("Webhook info:", info)
-        bot.remove_webhook()     # без лишних аргументов — совместимо со старыми версиями
-        time.sleep(0.5)
+        has_wad = bool(getattr(message, 'web_app_data', None) and getattr(message.web_app_data, 'data', None))
+        logging.info("DBG: type=%s has_web_app_data=%s text=%r",
+                     message.content_type, has_wad, (message.text or '')[:60])
     except Exception as e:
-        print("remove_webhook failed:", e)
+        logging.warning("DBG logger err: %s", e)
 
+# ===== запуск: безопасный цикл polling с авто-рестартом
+if __name__ == "__main__":
     try:
         if SELLER_CHAT_ID:
             bot.send_message(SELLER_CHAT_ID, "🚀 Бот запущен, ожидаю заказы.")
     except Exception as e:
         logging.warning("Can't DM SELLER_CHAT_ID on startup: %s", e)
 
-    bot.infinity_polling(
-        skip_pending=True,
-        timeout=60,
-        long_polling_timeout=50
-    )
+    while True:
+        try:
+            # Снять вебхук и перейти на polling
+            try:
+                info = bot.get_webhook_info()
+                logging.info("Webhook info: %s", info)
+            except Exception:
+                pass
+            try:
+                bot.remove_webhook()  # совместимо со старыми версиями telebot
+            except Exception as e:
+                logging.warning("remove_webhook failed: %s", e)
+
+            bot.infinity_polling(
+                skip_pending=True,
+                timeout=60,
+                long_polling_timeout=50
+            )
+            time.sleep(2)  # если вдруг вернёмся из polling — повторим
+
+        except telebot.apihelper.ApiTelegramException as e:
+            msg = str(e)
+            if "409" in msg or "terminated by other getUpdates" in msg:
+                logging.error("409: параллельный getUpdates. Жду 5с и пробую снова…")
+                try: bot.stop_polling()
+                except Exception: pass
+                time.sleep(5)
+                continue
+            logging.exception("Telegram API error, retry in 5s")
+            time.sleep(5)
+
+        except Exception:
+            logging.exception("Bot crashed, restart in 5s")
+            try: bot.stop_polling()
+            except Exception: pass
+            time.sleep(5)
