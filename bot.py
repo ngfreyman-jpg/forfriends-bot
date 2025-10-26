@@ -81,22 +81,54 @@ def handle_webapp_data(message: types.Message):
     try:
         data = json.loads(raw)
     except Exception:
-        data = {"raw": raw}
+        data = {}
 
-    # Сообщение продавцу: аккуратный JSON
-    pretty = json.dumps(data, ensure_ascii=False, indent=2)
-    user = message.from_user
+    # данные заказа
+    items = data.get("items") or []
+    comment = (data.get("comment") or "").strip() or "—"
+    # если total не пришёл — посчитаем сами
+    try:
+        total = int(data.get("total")) if data.get("total") is not None else \
+            int(sum((float(i.get("price") or 0) * int(i.get("qty") or 1)) for i in items))
+    except Exception:
+        total = 0
+
+    # шапка
+    u = message.from_user
     header = (
         "🧾 <b>Новая заявка</b>\n"
-        f"Клиент: <a href=\"tg://user?id={user.id}\">{user.first_name or ''}</a> "
-        f"(id: <code>{user.id}</code>)\n"
-        f"username: @{user.username if user.username else '—'}\n\n"
+        f"Клиент: <a href=\"tg://user?id={u.id}\">{u.first_name or ''}</a> "
+        f"(id: <code>{u.id}</code>)\n"
+        f"username: @{u.username if u.username else '—'}\n\n"
     )
-    body = f"<pre>{pretty}</pre>"
+
+    # список позиций в удобном виде (без категории)
+    lines = []
+    for i, it in enumerate(items, 1):
+        title = it.get("title") or "—"
+        sku   = it.get("id") or "—"
+        qty   = int(it.get("qty") or 1)
+        try:
+            price = int(float(it.get("price") or 0))
+        except Exception:
+            price = 0
+        lines.append(
+            f"{i}. <b>{title}</b>\n"
+            f"   id: <code>{sku}</code>\n"
+            f"   кол-во: {qty} • цена: {price} ₽"
+        )
+    body = "\n".join(lines) if lines else "—"
+
+    text = (
+        header +
+        body +
+        "\n\n"
+        f"💬 <b>Комментарий:</b> {comment}\n"
+        f"💰 <b>Итого:</b> {total} ₽"
+    )
 
     try:
-        bot.send_message(int(SELLER_CHAT_ID), header + body, disable_web_page_preview=True)
-        # Покупателю — короткое подтверждение
+        bot.send_message(int(SELLER_CHAT_ID), text, disable_web_page_preview=True)
         bot.reply_to(message, "✅ Заказ принят. Спасибо!")
     except Exception as e:
         log.exception("send order to seller failed")
@@ -131,7 +163,6 @@ if __name__ == "__main__":
             )
             time.sleep(1)  # если внезапно вышли — перезапустим цикл
         except telebot.apihelper.ApiTelegramException as e:
-            # типичный конфликт 409 — подождём и повторим
             if "409" in str(e) or "terminated by other getUpdates" in str(e):
                 logging.error("409 conflict: waiting 5s and retry…")
                 try: bot.stop_polling()
