@@ -3,7 +3,13 @@ from typing import Optional
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
+# --- наш лог
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# --- глушим внутренний логгер telebot (именно он печатает "Break infinity polling")
+try:
+    telebot.logger.setLevel(logging.CRITICAL)
+except Exception:
+    pass
 
 # --- токен
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TOKEN")
@@ -148,34 +154,54 @@ def _dbg_everything(message):
     except Exception as e:
         logging.warning("DBG logger err: %s", e)
 
-# ===== запуск: безопасный цикл polling с авто-рестартом
-if __name__ == "__main__":
+# ===== запуск
+def _prepare_polling():
+    """Снять вебхук и очистить хвосты, чтобы getUpdates точно работал."""
+    try:
+        info = bot.get_webhook_info()
+        logging.info("Webhook info before: %s", info)
+    except Exception:
+        pass
+
+    # Современный метод Telegram API — с очисткой очереди
+    try:
+        bot.delete_webhook(drop_pending_updates=True)
+        time.sleep(0.7)  # телеграму нужно чуть времени
+    except Exception as e:
+        logging.warning("delete_webhook failed: %s (try remove_webhook)", e)
+        try:
+            bot.remove_webhook()
+            time.sleep(0.7)
+        except Exception as e2:
+            logging.warning("remove_webhook failed too: %s", e2)
+
+    try:
+        info = bot.get_webhook_info()
+        logging.info("Webhook info after: %s", info)
+    except Exception:
+        pass
+
+def run():
+    # привет продавцу о старте (не критично)
     try:
         if SELLER_CHAT_ID:
             bot.send_message(SELLER_CHAT_ID, "🚀 Бот запущен, ожидаю заказы.")
     except Exception as e:
         logging.warning("Can't DM SELLER_CHAT_ID on startup: %s", e)
 
+    _prepare_polling()
+
+    # аккуратный перезапуск с увеличением паузы (без спама)
+    delay = 5
     while True:
         try:
-            # Снять вебхук и перейти на polling
-            try:
-                info = bot.get_webhook_info()
-                logging.info("Webhook info: %s", info)
-            except Exception:
-                pass
-            try:
-                bot.remove_webhook()  # совместимо со старыми версиями telebot
-            except Exception as e:
-                logging.warning("remove_webhook failed: %s", e)
-
             bot.infinity_polling(
                 skip_pending=True,
                 timeout=60,
                 long_polling_timeout=50
             )
-            time.sleep(2)  # если вдруг вернёмся из polling — повторим
-
+            # если вдруг вернулись без исключения — подождём и повторим
+            time.sleep(2)
         except telebot.apihelper.ApiTelegramException as e:
             msg = str(e)
             if "409" in msg or "terminated by other getUpdates" in msg:
@@ -184,11 +210,17 @@ if __name__ == "__main__":
                 except Exception: pass
                 time.sleep(5)
                 continue
-            logging.exception("Telegram API error, retry in 5s")
-            time.sleep(5)
-
-        except Exception:
-            logging.exception("Bot crashed, restart in 5s")
+            logging.exception("Telegram API error, retry in %ss", delay)
             try: bot.stop_polling()
             except Exception: pass
-            time.sleep(5)
+            time.sleep(delay)
+            delay = min(delay * 2, 60)  # до минуты
+        except Exception:
+            logging.exception("Bot crashed, retry in %ss", delay)
+            try: bot.stop_polling()
+            except Exception: pass
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+
+if __name__ == "__main__":
+    run()
