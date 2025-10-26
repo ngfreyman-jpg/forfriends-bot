@@ -1,223 +1,80 @@
 # bot.py
-import os, json, html, logging, time
-from typing import Optional
+import os, logging, time
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from telebot.apihelper import ApiTelegramException
 
-# --- лог
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 try:
-    telebot.logger.setLevel(logging.CRITICAL)  # глушим болтливый внутренний логгер
+    telebot.logger.setLevel(logging.CRITICAL)
 except Exception:
     pass
 
-# --- токен
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TOKEN")
+SELLER_CHAT_ID = os.getenv("SELLER_CHAT_ID")
+
 if not TOKEN:
-    raise RuntimeError("BOT_TOKEN/TOKEN не задан")
-
-# --- адрес веб-аппа (кнопка /start)
-WEBAPP_URL = (
-    os.getenv("CATALOG_WEBAPP_URL")
-    or os.getenv("CATALOG_URL")
-    or "https://ngfreyman-jpg.github.io/forfriends-catalog/"
-)
-
-def _parse_int(v: Optional[str]) -> Optional[int]:
-    try:
-        s = str(v or "").strip()
-        return int(s) if s and s.lower() != "none" else None
-    except Exception:
-        return None
-
-SELLER_CHAT_ID: Optional[int]     = _parse_int(os.getenv("SELLER_CHAT_ID", "1048516560"))
-ORDERS_LOG_CHAT_ID: Optional[int] = _parse_int(os.getenv("ORDERS_LOG_CHAT_ID"))
+    raise SystemExit("ENV BOT_TOKEN не задан")
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
-# ===== helpers
-def safe(x): return html.escape(str(x or ""))
+@bot.message_handler(commands=["start"])
+def on_start(m):
+    bot.reply_to(m, "Бот жив. Команда /ping тоже должна работать.")
 
-def format_order(data: dict, fallback_user) -> str:
-    items   = data.get("items") or []
-    comment = (data.get("comment") or "").strip()
-    total   = int(float(data.get("total") or 0))
-    u       = data.get("user") or {}
+@bot.message_handler(commands=["ping"])
+def on_ping(m):
+    bot.reply_to(m, "pong")
 
-    lines, grand = [], 0
-    for it in items:
-        title = safe(it.get("title"))
-        qty   = int(it.get("qty") or 1)
-        price = int(float(it.get("price") or 0))
-        sub   = qty * price
-        grand += sub
-        lines.append(f"• {title} — {qty} × {price} ₽ = {sub} ₽")
-
-    if total <= 0:
-        total = grand
-
-    buyer = safe(u.get("name") or fallback_user.full_name)
-    if u.get("username"): buyer += f" @{safe(u.get('username'))}"
-    if u.get("id"):       buyer += f" (id {safe(u.get('id'))})"
-
-    text = (
-        "<b>🧾 Новый заказ</b>\n"
-        f"Клиент: {buyer}\n\n"
-        "<b>Товары:</b>\n" + ("\n".join(lines) if lines else "—") +
-        f"\n\nИтого: <b>{total} ₽</b>\n"
-        f"Комментарий: {safe(comment) if comment else '—'}"
-    )
-    return text
-
-def send_log(msg: str):
-    if ORDERS_LOG_CHAT_ID:
-        try:
-            bot.send_message(ORDERS_LOG_CHAT_ID, msg)
-        except Exception as e:
-            logging.warning("send_log failed: %s", e)
-
-def deliver_order(message, payload: dict):
-    """Отправка заказа продавцу + копия отправителю + (опц.) лог-чат."""
-    text = format_order(payload, message.from_user)
-
-    targets = []
-    if SELLER_CHAT_ID:
-        targets.append(SELLER_CHAT_ID)
-    targets.append(message.chat.id)  # копия отправителю
-    if ORDERS_LOG_CHAT_ID:
-        targets.append(ORDERS_LOG_CHAT_ID)
-
-    errs = 0
-    for chat_id in targets:
-        try:
-            bot.send_message(chat_id, text)
-        except Exception as e:
-            errs += 1
-            logging.exception("deliver fail to %s: %s", chat_id, e)
-
-    if errs == 0 and message.chat.id != SELLER_CHAT_ID:
-        bot.send_message(message.chat.id, "✅ Заказ отправлен продавцу. Копия у вас.")
-    elif errs > 0:
-        bot.send_message(message.chat.id, "⚠️ Заказ создан, но не все адресаты получили сообщение.")
-
-# ===== UI
-@bot.message_handler(commands=['start'])
-def cmd_start(message):
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton(text="Открыть каталог 👕", web_app=WebAppInfo(WEBAPP_URL)))
-    bot.send_message(message.chat.id, "Привет! Нажми кнопку, чтобы открыть каталог:", reply_markup=kb)
-
-@bot.message_handler(commands=['id'])
-def cmd_id(message):
-    bot.send_message(message.chat.id, f"Ваш chat_id: <code>{message.chat.id}</code>")
-
-# ===== Приём заказа из WebApp (основной хэндлер)
-@bot.message_handler(content_types=['web_app_data'])
-def handle_web_app_data(message):
-    try:
-        payload = json.loads(message.web_app_data.data)
-        logging.info("GOT WEB_APP_DATA (native) from %s: %s", message.from_user.id, payload)
-        send_log(f"🧩 got web_app_data from <code>{message.from_user.id}</code>")
-    except Exception as e:
-        logging.exception("bad web_app_data: %s", e)
-        bot.send_message(message.chat.id, "Не удалось обработать заказ 😕 Попробуйте ещё раз.")
+@bot.message_handler(commands=["test_seller"])
+def on_test_seller(m):
+    if not SELLER_CHAT_ID:
+        bot.reply_to(m, "SELLER_CHAT_ID не задан в ENV")
         return
-    deliver_order(message, payload)
-
-# ===== ФОЛБЭК: иногда web_app_data приходит вместе с text
-@bot.message_handler(content_types=['text'])
-def handle_text_possible_webapp(message):
-    wad = getattr(message, 'web_app_data', None)
-    if wad and getattr(wad, 'data', None):
-        try:
-            payload = json.loads(wad.data)
-            logging.info("GOT WEB_APP_DATA (fallback/text) from %s: %s", message.from_user.id, payload)
-            send_log(f"🧩 got web_app_data (fallback) from <code>{message.from_user.id}</code>")
-            deliver_order(message, payload)
-            return
-        except Exception as e:
-            logging.exception("bad web_app_data (fallback): %s", e)
-            bot.send_message(message.chat.id, "Не удалось обработать заказ 😕 Попробуйте ещё раз.")
-            return
-    # прочие тексты — по желанию
-
-# ===== отладочный ловец всего
-@bot.message_handler(func=lambda m: True, content_types=[
-    'text','web_app_data','photo','document','contact','location','venue',
-    'sticker','audio','video','voice','dice','poll'
-])
-def _dbg_everything(message):
     try:
-        has_wad = bool(getattr(message, 'web_app_data', None) and getattr(message.web_app_data, 'data', None))
-        logging.info("DBG: type=%s has_web_app_data=%s text=%r",
-                     message.content_type, has_wad, (message.text or '')[:60])
+        bot.send_message(int(SELLER_CHAT_ID), f"Test message from user {m.from_user.id}")
+        bot.reply_to(m, "Отправил продавцу.")
     except Exception as e:
-        logging.warning("DBG logger err: %s", e)
-
-# ===== подготовка polling
-def _prepare_polling():
-    """Снять вебхук и очистить хвосты, чтобы getUpdates точно работал."""
-    try:
-        info = bot.get_webhook_info()
-        logging.info("Webhook info before: %s", info)
-    except Exception:
-        pass
-
-    try:
-        bot.delete_webhook(drop_pending_updates=True)  # современный способ
-        time.sleep(0.7)
-    except Exception as e:
-        logging.warning("delete_webhook failed: %s (try remove_webhook)", e)
-        try:
-            bot.remove_webhook()
-            time.sleep(0.7)
-        except Exception as e2:
-            logging.warning("remove_webhook failed too: %s", e2)
-
-    try:
-        info = bot.get_webhook_info()
-        logging.info("Webhook info after: %s", info)
-    except Exception:
-        pass
+        bot.reply_to(m, f"Не смог отправить продавцу: {e}")
 
 def run():
-    # привет продавцу о старте (не критично)
+    # 1) Сносим вебхук и чистим “хвосты”
     try:
-        if SELLER_CHAT_ID:
-            bot.send_message(SELLER_CHAT_ID, "🚀 Бот запущен, ожидаю заказы.")
+        info_before = bot.get_webhook_info()
+        logging.info("Webhook info BEFORE: %s", info_before)
+        bot.remove_webhook(drop_pending_updates=True)
+        info_after = bot.get_webhook_info()
+        logging.info("Webhook info AFTER: %s", info_after)
     except Exception as e:
-        logging.warning("Can't DM SELLER_CHAT_ID on startup: %s", e)
+        logging.warning("Не смог получить/удалить вебхук: %s", e)
 
-    _prepare_polling()
+    # 2) Проверим токен
+    try:
+        me = bot.get_me()
+        logging.info("getMe: id=%s username=@%s name=%s", me.id, getattr(me, "username", None), me.first_name)
+    except Exception as e:
+        logging.error("getMe провалился: %s", e)
+        time.sleep(5)
 
-    # аккуратный перезапуск с ростом задержки
-    delay = 5
+    # 3) Стартуем один цикл polling с бэкоффом
+    delay = 1
     while True:
         try:
+            logging.info("START polling")
             bot.infinity_polling(
-                skip_pending=True,
-                timeout=60,
-                long_polling_timeout=50,
-                allowed_updates=['message']   # web_app_data приходит внутри message
+                timeout=30,      # таймаут long poll
+                long_polling_timeout=30,
+                allowed_updates=["message", "callback_query"]
             )
-            time.sleep(2)
-        except telebot.apihelper.ApiTelegramException as e:
-            msg = str(e)
-            if "409" in msg or "terminated by other getUpdates" in msg:
-                logging.error("409: параллельный getUpdates. Жду 5с и пробую снова…")
-                try: bot.stop_polling()
-                except Exception: pass
-                time.sleep(5)
-                continue
-            logging.exception("Telegram API error, retry in %ss", delay)
-            try: bot.stop_polling()
-            except Exception: pass
+            delay = 1  # если polling завершился сам — сбросим задержку и попробуем снова
+        except ApiTelegramException as e:
+            # 409 = параллельный getUpdates => где-то второй инстанс
+            logging.error("API error: %s", e)
+            if getattr(e, "result", None) and getattr(e.result, "status_code", None) == 409:
+                logging.error("Параллельный getUpdates (409). Значит запущен второй процесс/деплой.")
             time.sleep(delay)
             delay = min(delay * 2, 60)
-        except Exception:
-            logging.exception("Bot crashed, retry in %ss", delay)
-            try: bot.stop_polling()
-            except Exception: pass
+        except Exception as e:
+            logging.exception("Poll crashed: %s", e)
             time.sleep(delay)
             delay = min(delay * 2, 60)
 
