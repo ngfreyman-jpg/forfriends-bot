@@ -1,136 +1,131 @@
 import os
+import json
 import time
 import logging
-import requests
-import telebot
-from telebot.apihelper import ApiException
+from urllib.request import urlopen, Request
+from urllib.parse import urlencode
 
+import telebot
+from telebot import types
+
+# ---------- конфиг ----------
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+CATALOG_WEBAPP_URL = os.getenv("CATALOG_WEBAPP_URL", "").strip()
+SELLER_CHAT_ID = os.getenv("SELLER_CHAT_ID", "").strip()  # строкой ок
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is empty")
+if not CATALOG_WEBAPP_URL:
+    raise RuntimeError("CATALOG_WEBAPP_URL is empty")
+if not SELLER_CHAT_ID:
+    raise RuntimeError("SELLER_CHAT_ID is empty")
+
+# ---------- логирование ----------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
+    format="%(asctime)s %(levelname)s %(message)s",
 )
 log = logging.getLogger("bot")
 
-TOKEN = os.getenv("BOT_TOKEN", "").strip()
-CATALOG_WEBAPP_URL = os.getenv("CATALOG_WEBAPP_URL", "").strip()
-SELLER_CHAT_ID = os.getenv("SELLER_CHAT_ID", "").strip()
+# ---------- инициализация ----------
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=True)
 
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN is empty")
-
-# parse_mode можно включить, если нужно форматирование
-bot = telebot.TeleBot(TOKEN, parse_mode="HTML", skip_pending=True)
-
-def tg(method: str, **params):
-    url = f"https://api.telegram.org/bot{TOKEN}/{method}"
-    r = requests.get(url, params=params, timeout=15)
-    r.raise_for_status()
-    return r.json()
-
-def remove_webhook_hard():
+# ---------- утилиты ----------
+def tg_api_call(method: str, params: dict = None):
+    """
+    Прямая работа с Telegram API без сторонних либ (чтобы гарантированно
+    удалить вебхук с drop_pending_updates и не ловить несовпадения сигнатур).
+    """
+    params = params or {}
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    if params:
+        url = f"{url}?{urlencode(params)}"
+    req = Request(url, headers={"User-Agent": "bot"})
+    with urlopen(req, timeout=10) as resp:
+        raw = resp.read().decode("utf-8")
     try:
-        before = tg("getWebhookInfo")
-        log.info("Webhook info BEFORE: %s", before)
-    except Exception as e:
-        log.warning("getWebhookInfo failed before: %s", e)
+        return json.loads(raw)
+    except Exception:
+        return {"ok": False, "raw": raw}
 
-    # Даже если либа старая — снимем вебхук руками
+def safe_delete_webhook():
+    # 1) жёстко удаляем вебхук с drop_pending_updates=true
     try:
-        res = tg("deleteWebhook", drop_pending_updates="true")
-        log.info("deleteWebhook: %s", res)
+        r = tg_api_call("deleteWebhook", {"drop_pending_updates": "true"})
+        log.info(f"deleteWebhook -> {r}")
     except Exception as e:
-        log.warning("deleteWebhook failed: %s", e)
-
-    # Небольшая пауза, чтобы телега закрыла прежний long-poll
-    time.sleep(1.5)
-
+        log.warning(f"deleteWebhook failed: {e}")
+    # 2) проверим состояние
     try:
-        after = tg("getWebhookInfo")
-        log.info("Webhook info AFTER: %s", after)
+        info = tg_api_call("getWebhookInfo")
+        log.info(f"getWebhookInfo -> {info}")
     except Exception as e:
-        log.warning("getWebhookInfo failed after: %s", e)
+        log.warning(f"getWebhookInfo failed: {e}")
 
+# ---------- команды ----------
 @bot.message_handler(commands=["start"])
-def on_start(m: telebot.types.Message):
-    text = "🚀 Бот запущен, ожидаю заказы."
-    if CATALOG_WEBAPP_URL:
-        # Кнопка Web App, если она используется в твоём фронте
-        kb = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-        btn = telebot.types.KeyboardButton("Открыть каталог", web_app=telebot.types.WebAppInfo(CATALOG_WEBAPP_URL))
-        kb.add(btn)
-        bot.reply_to(m, text, reply_markup=kb)
-    else:
-        bot.reply_to(m, text)
+def cmd_start(message: types.Message):
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(types.KeyboardButton("Открыть каталог", web_app=types.WebAppInfo(CATALOG_WEBAPP_URL)))
+    bot.reply_to(
+        message,
+        "🚀 Бот запущен, ожидаю заказы.\n\nНажми кнопку ниже, чтобы открыть каталог.",
+        reply_markup=kb,
+    )
 
 @bot.message_handler(commands=["ping"])
-def on_ping(m: telebot.types.Message):
-    bot.reply_to(m, "pong")
+def cmd_ping(message: types.Message):
+    bot.reply_to(message, "pong")
 
 @bot.message_handler(commands=["test_seller"])
-def on_test_seller(m: telebot.types.Message):
-    if not SELLER_CHAT_ID:
-        bot.reply_to(m, "SELLER_CHAT_ID не задан")
-        return
+def cmd_test_seller(message: types.Message):
+    # пробросим простую тестовую заметку продавцу
+    text = f"Test message from user <b>{message.from_user.id}</b>"
     try:
-        bot.send_message(int(SELLER_CHAT_ID), f"Test message from user {m.from_user.id}")
-        bot.reply_to(m, "Отправил продавцу.")
+        bot.send_message(int(SELLER_CHAT_ID), text)
+        bot.reply_to(message, "Отправил продавцу ✔️")
     except Exception as e:
-        log.exception("send to seller failed")
-        bot.reply_to(m, f"Не смог отправить продавцу: {e}")
+        log.exception("send test to seller failed")
+        bot.reply_to(message, f"Не удалось отправить продавцу: {e}")
 
-# Если у тебя прилетает WebAppData из кнопки «Отправить продавцу»
+# ---------- приём данных из WebApp (кнопка «Отправить продавцу»/submit) ----------
 @bot.message_handler(content_types=["web_app_data"])
-def on_webapp(m: telebot.types.Message):
-    data = m.web_app_data.data if m.web_app_data else ""
-    if not data:
-        bot.reply_to(m, "Пустые данные из веб-приложения")
-        return
-    if SELLER_CHAT_ID:
-        bot.send_message(int(SELLER_CHAT_ID), f"Заявка от {m.from_user.id}:\n{data}")
-        bot.reply_to(m, "Отправил продавцу.")
-    else:
-        bot.reply_to(m, "SELLER_CHAT_ID не задан — некуда отправлять")
-
-def run_polling_forever():
-    # Снять вебхук НАДЁЖНО
-    remove_webhook_hard()
-
-    # Команды в меню бота (по желанию)
+def handle_webapp_data(message: types.Message):
+    # message.web_app_data.data — это строка; попытаемся распарсить JSON
+    raw = message.web_app_data.data
     try:
-        bot.set_my_commands([
-            telebot.types.BotCommand("start", "запустить бота"),
-            telebot.types.BotCommand("ping", "проверка"),
-            telebot.types.BotCommand("test_seller", "тест продавцу")
-        ])
+        data = json.loads(raw)
     except Exception:
-        pass
+        data = {"raw": raw}
 
-    # Цикл с авторестартом на конфликт/сеть
-    while True:
-        try:
-            me = tg("getMe")
-            log.info("getMe: id=%s username=@%s name=%s",
-                     me.get("result", {}).get("id"),
-                     me.get("result", {}).get("username"),
-                     me.get("result", {}).get("first_name"))
-        except Exception as e:
-            log.warning("getMe failed: %s", e)
+    # соберём человекочитаемое сообщение продавцу
+    pretty = json.dumps(data, ensure_ascii=False, indent=2)
+    user = message.from_user
+    header = (
+        f"🧾 <b>Новая заявка</b>\n"
+        f"from: <a href=\"tg://user?id={user.id}\">{user.first_name or ''}</a> (id: <code>{user.id}</code>)\n"
+        f"username: @{user.username if user.username else '—'}\n"
+    )
+    body = f"<pre>{pretty}</pre>"
 
-        log.info("START polling")
-        try:
-            # none_stop=True чтобы не падал на handler-исключениях
-            bot.infinity_polling(timeout=20, long_polling_timeout=20)
-        except ApiException as e:
-            # Конфликт 409 — кто-то ещё держит long-poll. Подождать и повторить.
-            if getattr(e, "result", None) and getattr(e.result, "status_code", None) == 409:
-                log.warning("409 Conflict (кто-то ещё читает getUpdates). Жду 65 сек и повторяю…")
-                time.sleep(65)
-                continue
-            log.exception("ApiException, перезапускаю через 10 сек")
-            time.sleep(10)
-        except Exception:
-            log.exception("Polling crashed, retry in 10s")
-            time.sleep(10)
+    try:
+        bot.send_message(int(SELLER_CHAT_ID), header + body, disable_web_page_preview=True)
+        bot.reply_to(message, "✅ Вы успешно передали данные боту кнопкой «Открыть каталог».")
+    except Exception as e:
+        log.exception("send order to seller failed")
+        bot.reply_to(message, f"❌ Не удалось передать данные продавцу: {e}")
 
+# ---------- запуск ----------
 if __name__ == "__main__":
-    run_polling_forever()
+    log.info("starting…")
+    safe_delete_webhook()  # гарантированно убираем вебхук и висящие апдейты
+    # даём чуть-чуть времени, чтобы у телеги «отпустило»
+    time.sleep(1)
+
+    # важное: пропускаем накопленные апдейты и явно задаём таймауты
+    bot.infinity_polling(
+        timeout=10,
+        long_polling_timeout=20,
+        skip_pending=True,          # 💡 чтобы не выедались старые апдейты
+        allowed_updates=["message", "web_app_data"],
+    )
