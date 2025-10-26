@@ -1,13 +1,13 @@
+# bot.py
 import os, json, html, logging, time
 from typing import Optional
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
-# --- наш лог
+# --- лог
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-# --- глушим внутренний логгер telebot (именно он печатает "Break infinity polling")
 try:
-    telebot.logger.setLevel(logging.CRITICAL)
+    telebot.logger.setLevel(logging.CRITICAL)  # глушим болтливый внутренний логгер
 except Exception:
     pass
 
@@ -141,7 +141,7 @@ def handle_text_possible_webapp(message):
             return
     # прочие тексты — по желанию
 
-# ===== очень простой отладочный логер (не влияет на логику)
+# ===== отладочный ловец всего
 @bot.message_handler(func=lambda m: True, content_types=[
     'text','web_app_data','photo','document','contact','location','venue',
     'sticker','audio','video','voice','dice','poll'
@@ -154,7 +154,7 @@ def _dbg_everything(message):
     except Exception as e:
         logging.warning("DBG logger err: %s", e)
 
-# ===== запуск
+# ===== подготовка polling
 def _prepare_polling():
     """Снять вебхук и очистить хвосты, чтобы getUpdates точно работал."""
     try:
@@ -163,10 +163,9 @@ def _prepare_polling():
     except Exception:
         pass
 
-    # Современный метод Telegram API — с очисткой очереди
     try:
-        bot.delete_webhook(drop_pending_updates=True)
-        time.sleep(0.7)  # телеграму нужно чуть времени
+        bot.delete_webhook(drop_pending_updates=True)  # современный способ
+        time.sleep(0.7)
     except Exception as e:
         logging.warning("delete_webhook failed: %s (try remove_webhook)", e)
         try:
@@ -191,16 +190,16 @@ def run():
 
     _prepare_polling()
 
-    # аккуратный перезапуск с увеличением паузы (без спама)
+    # аккуратный перезапуск с ростом задержки
     delay = 5
     while True:
         try:
             bot.infinity_polling(
                 skip_pending=True,
                 timeout=60,
-                long_polling_timeout=50
+                long_polling_timeout=50,
+                allowed_updates=['message']   # web_app_data приходит внутри message
             )
-            # если вдруг вернулись без исключения — подождём и повторим
             time.sleep(2)
         except telebot.apihelper.ApiTelegramException as e:
             msg = str(e)
@@ -214,7 +213,7 @@ def run():
             try: bot.stop_polling()
             except Exception: pass
             time.sleep(delay)
-            delay = min(delay * 2, 60)  # до минуты
+            delay = min(delay * 2, 60)
         except Exception:
             logging.exception("Bot crashed, retry in %ss", delay)
             try: bot.stop_polling()
